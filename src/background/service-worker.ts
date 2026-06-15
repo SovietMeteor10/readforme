@@ -144,6 +144,7 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
       return { ok: true };
 
     case 'PLAYER_STATE':
+      updatePlaybackState(message.payload as { state?: string } | undefined);
       await notifyActiveTab(message);
       return { ok: true };
 
@@ -159,6 +160,11 @@ async function handleMessage(message: ExtensionMessage, sender: chrome.runtime.M
 async function startPlayback(payload: PlayPayload, tabId: number | null) {
   if (!tabId) throw new Error('No active tab available for playback.');
   if (!chrome.offscreen) throw new Error('Please update Chrome to use ReadAloud.');
+
+  if (state === 'playing' && activeTabId === tabId) {
+    console.info('[ReadAloud SW] ignoring duplicate PLAY while already playing');
+    return;
+  }
 
   if (activeTabId && activeTabId !== tabId) {
     await notifyActiveTab({ type: 'ERROR', payload: { message: 'Playback moved to another tab.', recoverable: false } });
@@ -224,6 +230,7 @@ async function seekToParagraph(paragraphId?: string) {
 async function handlePlaybackHighlight(payload?: Partial<HighlightPayload>) {
   if (!payload?.paragraphId) return;
 
+  state = 'playing';
   const chunkIndex = typeof payload.chunkIndex === 'number'
     ? payload.chunkIndex
     : chunks.findIndex((chunk) => chunk.paragraphId === payload.paragraphId);
@@ -235,6 +242,14 @@ async function handlePlaybackHighlight(payload?: Partial<HighlightPayload>) {
   const progress = progressForChunk(chunk);
   await notifyActiveTab({ type: 'HIGHLIGHT', payload: progress });
   await notifyActiveTab({ type: 'PLAYER_PROGRESS', payload: progress });
+}
+
+function updatePlaybackState(payload?: { state?: string }) {
+  if (payload?.state === 'playing') {
+    state = 'playing';
+  } else if (payload?.state === 'preparing') {
+    state = 'loading';
+  }
 }
 
 async function ensureOffscreen() {

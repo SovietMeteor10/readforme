@@ -48,7 +48,7 @@ let currentAudio: HTMLAudioElement | null = null;
 let currentChunk: SynthesisedChunk | null = null;
 let wordHighlightTimer: ReturnType<typeof globalThis.setInterval> | null = null;
 let currentGen = 0;
-let keepAliveAudio: HTMLAudioElement | null = null;
+let keepAliveAudio: { pause: () => void } | null = null;
 let keepAliveAudioUrl: string | null = null;
 let kokoroModulePromise: Promise<KokoroModule> | null = null;
 let lastProgressPercent = -1;
@@ -205,6 +205,7 @@ async function startPlayback(chunks: Chunk[], voice: string, speed: number) {
   const gen = currentGen;
 
   try {
+    cleanupReadAloudDomArtifacts(document);
     stopCurrentPlayback(false);
     startKeepAlive();
 
@@ -399,8 +400,26 @@ function playDirect(result: SynthesisedChunk, gen: number, existingAudio?: HTMLA
     advancePlayback(gen);
   };
 
+  console.log(
+    '[RA:offscreen] playing chunk',
+    result.chunkIndex,
+    'url:',
+    result.audioUrl.slice(0, 40),
+    'duration:',
+    result.durationMs,
+    'ms',
+    'audio.readyState:',
+    currentAudio.readyState,
+    'audio.error:',
+    currentAudio.error
+  );
+
   currentAudio.play().catch((error) => {
-    console.error('[ReadAloud offscreen] play failed', error);
+    console.error(
+      '[RA:offscreen] PLAY BLOCKED:',
+      error instanceof Error ? error.name : typeof error,
+      error instanceof Error ? error.message : String(error)
+    );
     isPlaying = false;
     stopWordHighlighting();
     cleanupObjectUrl(result.audioUrl);
@@ -434,6 +453,16 @@ async function synthesiseOne(chunk: Chunk, gen: number): Promise<SynthesisedChun
       voice: (currentVoice || DEFAULT_VOICE) as any
     }) as unknown;
 
+    const rawResult = result as { audio?: unknown; sampling_rate?: unknown } | null;
+    console.log(
+      '[RA:tts] raw result type:',
+      result && typeof result === 'object' ? result.constructor?.name : typeof result,
+      'audio:',
+      rawResult?.audio && typeof rawResult.audio === 'object' ? rawResult.audio.constructor?.name : typeof rawResult?.audio,
+      rawResult?.audio instanceof Float32Array ? rawResult.audio.length : undefined,
+      'sr:',
+      rawResult?.sampling_rate
+    );
     console.log('[RA:tts] generate() returned:', describeGenerateResult(result));
 
     if (gen !== currentGen) return null;
@@ -606,27 +635,32 @@ function startKeepAlive() {
   if (keepAliveAudio) return;
 
   try {
-    const sampleRate = 24000;
-    const wavBlob = float32ToWav(new Float32Array(sampleRate), sampleRate);
-    keepAliveAudioUrl = URL.createObjectURL(wavBlob);
-    keepAliveAudio = new Audio(keepAliveAudioUrl);
-    keepAliveAudio.loop = true;
-    keepAliveAudio.volume = 0.001;
-    keepAliveAudio.play().catch((error) => {
-      console.warn('[ReadAloud offscreen] keepalive audio failed', error instanceof Error ? error.message : error);
-      stopKeepAlive();
-    });
+    const ctx = new AudioContext({ sampleRate: 24000 });
+    const buf = ctx.createBuffer(1, 2400, 24000);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    src.connect(ctx.destination);
+    src.start();
+    (globalThis as { __raKeepaliveCtx?: AudioContext }).__raKeepaliveCtx = ctx;
+    (globalThis as { __raKeepaliveSrc?: AudioBufferSourceNode }).__raKeepaliveSrc = src;
+    keepAliveAudio = {
+      pause: () => {
+        src.stop();
+        void ctx.close();
+      }
+    };
   } catch (error) {
-    console.warn('[ReadAloud offscreen] keepalive setup failed', error);
+    console.warn('[RA:offscreen] keepalive failed:', error);
   }
 }
 
 function stopKeepAlive() {
   if (!keepAliveAudio) return;
   keepAliveAudio.pause();
-  keepAliveAudio.removeAttribute('src');
-  keepAliveAudio.load();
   keepAliveAudio = null;
+  delete (globalThis as { __raKeepaliveCtx?: AudioContext }).__raKeepaliveCtx;
+  delete (globalThis as { __raKeepaliveSrc?: AudioBufferSourceNode }).__raKeepaliveSrc;
   if (keepAliveAudioUrl) {
     cleanupObjectUrl(keepAliveAudioUrl);
     keepAliveAudioUrl = null;
@@ -684,6 +718,16 @@ function sendError(message: string) {
 
 function cleanupObjectUrl(url: string) {
   URL.revokeObjectURL(url);
+}
+
+function cleanupReadAloudDomArtifacts(doc: Document) {
+  doc.querySelectorAll('.ra-word').forEach((span) => {
+    span.parentNode?.replaceChild(doc.createTextNode(span.textContent ?? ''), span);
+  });
+  doc.querySelectorAll('[data-readaloud-id]').forEach((el) => {
+    el.removeAttribute('data-readaloud-id');
+    if (el instanceof HTMLElement) delete el.dataset.readaloudId;
+  });
 }
 
 function readSpeed(payload: unknown): number {

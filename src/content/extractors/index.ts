@@ -147,6 +147,8 @@ function isReadableElement(el: Element): boolean {
 }
 
 export function extractArticleChunks(doc: Document): Chunk[] {
+  cleanupReadAloudDomArtifacts(doc);
+
   const articleBody =
     doc.querySelector('#mw-content-text .mw-parser-output') ||
     doc.querySelector('article') ||
@@ -175,6 +177,16 @@ export function extractArticleChunks(doc: Document): Chunk[] {
   });
 
   return chunks;
+}
+
+function cleanupReadAloudDomArtifacts(doc: Document) {
+  doc.querySelectorAll('.ra-word').forEach((span) => {
+    span.parentNode?.replaceChild(doc.createTextNode(span.textContent ?? ''), span);
+  });
+  doc.querySelectorAll('[data-readaloud-id]').forEach((el) => {
+    el.removeAttribute('data-readaloud-id');
+    if (el instanceof HTMLElement) delete el.dataset.readaloudId;
+  });
 }
 
 function chunkParagraphText(text: string, paragraphId: string, startIndex: number): Chunk[] {

@@ -12,6 +12,7 @@ declare global {
     __readAloudPlayer?: ReadAloudPlayer | null;
     __readAloudExtractionPromise?: Promise<void> | null;
     __readAloudContextElement?: Element | null;
+    __readAloudLastRightClick?: Element | null;
     __readAloudReadingSelection?: boolean;
     __readAloudClickHandlerAttached?: boolean;
   }
@@ -28,6 +29,7 @@ function initReadAloud() {
   window.__readAloudPlayer ??= null;
   window.__readAloudExtractionPromise ??= null;
   window.__readAloudContextElement ??= null;
+  window.__readAloudLastRightClick ??= null;
   window.__readAloudReadingSelection ??= false;
   window.__readAloudClickHandlerAttached ??= false;
 
@@ -38,6 +40,7 @@ function registerMessageListener() {
   if (!window.__readAloudInjected) {
     window.__readAloudInjected = true;
     document.addEventListener('contextmenu', (event) => {
+      window.__readAloudLastRightClick = event.target instanceof Element ? event.target : null;
       window.__readAloudContextElement = findReadableElement(event.target);
     }, true);
     chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
@@ -58,12 +61,21 @@ async function handleMessage(message: ExtensionMessage) {
       return { ok: true };
     case 'READ_FROM_SELECTION': {
       const payload = message.payload as { selectionText?: string | null } | undefined;
-      const selectionText = payload?.selectionText ?? null;
-      if (!selectionText && !window.__readAloudContextElement) {
-        startReading('toolbar', null);
-      } else {
+      const selectionText = payload?.selectionText?.trim() ?? null;
+      if (selectionText && selectionText.length > 10) {
         startReading('context', selectionText);
+        return { ok: true };
       }
+
+      const rightClickEl = window.__readAloudLastRightClick ?? null;
+      const player = document.getElementById('readaloud-player');
+      const readable = rightClickEl?.closest('p, h1, h2, h3, h4, li, article, [role="main"]');
+      if (rightClickEl && readable && !player?.contains(rightClickEl)) {
+        startReading('context', null);
+        return { ok: true };
+      }
+
+      console.info('[ReadAloud content] READ_FROM_SELECTION ignored - no valid target');
       return { ok: true };
     }
     case 'HIGHLIGHT':
@@ -97,6 +109,12 @@ async function handleMessage(message: ExtensionMessage) {
 }
 
 function startReading(mode: 'toolbar' | 'context', selectionText?: string | null) {
+  const player = document.getElementById('readaloud-player');
+  if (player?.dataset.state === 'playing') {
+    console.info('[ReadAloud content] already playing, ignoring START_FROM_ACTION');
+    return;
+  }
+
   window.__readAloudExtractionPromise = null;
   console.info('[ReadAloud content] toolbar start received');
   const ui = getPlayer();
