@@ -45,6 +45,7 @@ let isPlaying = false;
 let isPaused = false;
 let waitingForNext = false;
 let audioCtx: AudioContext | null = null;
+let gainNode: GainNode | null = null;
 let currentSource: AudioBufferSourceNode | null = null;
 let playbackStartCtxTime = 0;
 let currentChunk: SynthesisedChunk | null = null;
@@ -343,6 +344,22 @@ function playDirect(result: SynthesisedChunk, gen: number) {
 
   const ctx = getAudioCtx();
 
+  console.log('[RA:audio] playDirect called:', {
+    chunkIndex: result.chunkIndex,
+    samplesLength: result.samples.length,
+    sampleRate: result.sampleRate,
+    durationMs: result.durationMs,
+    audioCtxState: ctx.state,
+    gainValue: gainNode?.gain.value
+  });
+
+  // Ensure context is running — Chrome may suspend it.
+  if (ctx.state === 'suspended') {
+    void ctx.resume().then(() => {
+      console.log('[RA:audio] AudioContext resumed, state:', ctx.state);
+    });
+  }
+
   // Stop any source still attached before starting the next one.
   if (currentSource) {
     currentSource.onended = null;
@@ -362,7 +379,7 @@ function playDirect(result: SynthesisedChunk, gen: number) {
   const source = ctx.createBufferSource();
   source.buffer = audioBuffer;
   source.playbackRate.value = currentSpeed;
-  source.connect(ctx.destination);
+  source.connect(gainNode ?? ctx.destination);
   currentSource = source;
 
   chrome.runtime.sendMessage({
@@ -403,6 +420,7 @@ function playDirect(result: SynthesisedChunk, gen: number) {
 
   console.log(`[RA:audio] playing chunk ${result.chunkIndex} via AudioContext, ${result.durationMs.toFixed(0)}ms`);
   source.start(0);
+  console.log('[RA:audio] source.start(0) called, context time:', ctx.currentTime);
 }
 
 async function synthesiseOne(chunk: Chunk, gen: number): Promise<SynthesisedChunk | null> {
@@ -603,6 +621,9 @@ function completePlayback(gen: number) {
 function getAudioCtx(): AudioContext {
   if (!audioCtx || audioCtx.state === 'closed') {
     audioCtx = new AudioContext({ sampleRate: 24000 });
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = 1.0;
+    gainNode.connect(audioCtx.destination);
   }
   if (audioCtx.state === 'suspended') {
     void audioCtx.resume();

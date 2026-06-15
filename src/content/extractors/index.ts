@@ -156,25 +156,65 @@ export function extractArticleChunks(doc: Document): Chunk[] {
     doc.body;
 
   const elements: Element[] = [];
-  const chunks: Chunk[] = [];
-  let chunkIndex = 0;
-
   collectReadable(articleBody, elements);
 
+  // First pass: get all element texts and tag each with a paragraph ID.
+  const paragraphs: { text: string; paragraphId: string; el: Element }[] = [];
   elements.forEach((el, elIndex) => {
     const text = getCleanText(el);
     if (text.length < 20) return;
-
     const paragraphId = `ra-${elIndex}`;
     if (el instanceof HTMLElement) {
       el.dataset.readaloudId = paragraphId;
       el.setAttribute('data-readaloud-id', paragraphId);
     }
-
-    const paragraphChunks = chunkParagraphText(text, paragraphId, chunkIndex);
-    chunks.push(...paragraphChunks);
-    chunkIndex += paragraphChunks.length;
+    paragraphs.push({ text, paragraphId, el });
   });
+
+  // Second pass: merge consecutive short paragraphs into chunks of ~600 chars
+  // so each synthesis call yields long-enough audio to hide the next chunk's
+  // synthesis latency. Headings always stand alone.
+  const TARGET_CHUNK_CHARS = 600;
+  const chunks: Chunk[] = [];
+  let chunkIndex = 0;
+  let buffer = '';
+  let bufferParagraphId = '';
+
+  const flushBuffer = () => {
+    if (!buffer.trim()) return;
+    chunks.push({ index: chunkIndex++, text: buffer.trim(), paragraphId: bufferParagraphId });
+    buffer = '';
+    bufferParagraphId = '';
+  };
+
+  for (const { text, paragraphId, el } of paragraphs) {
+    const isHeading = /^H[1-4]$/.test(el.tagName);
+
+    if (isHeading) {
+      // Headings flush the current buffer and stand alone.
+      flushBuffer();
+      chunks.push({ index: chunkIndex++, text, paragraphId });
+      continue;
+    }
+
+    if (buffer && (buffer.length + text.length + 1) > TARGET_CHUNK_CHARS) {
+      // Adding this paragraph would overshoot — flush what we have first.
+      flushBuffer();
+    }
+
+    if (!buffer) {
+      buffer = text;
+      bufferParagraphId = paragraphId;
+    } else {
+      // Keep the first paragraph's ID as the highlight target.
+      buffer += ' ' + text;
+    }
+
+    if (buffer.length >= TARGET_CHUNK_CHARS) {
+      flushBuffer();
+    }
+  }
+  flushBuffer();
 
   return chunks;
 }
