@@ -306,7 +306,7 @@ function advancePlayback(gen: number) {
     waitingForNext = false;
 
     if (playHead + 1 < playQueue.length) fetchAndStage(playHead + 1, gen);
-    playDirect(next.result, gen);
+    void playDirect(next.result, gen);
     return;
   }
 
@@ -336,10 +336,10 @@ function advancePlayback(gen: number) {
 }
 
 function playResult(result: SynthesisedChunk, gen: number) {
-  playDirect(result, gen);
+  void playDirect(result, gen);
 }
 
-function playDirect(result: SynthesisedChunk, gen: number) {
+async function playDirect(result: SynthesisedChunk, gen: number) {
   if (gen !== currentGen) return;
 
   const ctx = getAudioCtx();
@@ -353,12 +353,17 @@ function playDirect(result: SynthesisedChunk, gen: number) {
     gainValue: gainNode?.gain.value
   });
 
-  // Ensure context is running — Chrome may suspend it.
-  if (ctx.state === 'suspended') {
-    void ctx.resume().then(() => {
-      console.log('[RA:audio] AudioContext resumed, state:', ctx.state);
-    });
+  // Ensure context is running — Chrome may suspend it. Must await before
+  // source.start(0); starting into a suspended context produces silence.
+  if (ctx.state !== 'running') {
+    try {
+      await ctx.resume();
+      console.log('[RA:audio] AudioContext resumed, state now:', ctx.state);
+    } catch (e) {
+      console.error('[RA:audio] resume() failed:', e);
+    }
   }
+  if (gen !== currentGen) return;
 
   // Stop any source still attached before starting the next one.
   if (currentSource) {
