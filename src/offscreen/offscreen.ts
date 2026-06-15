@@ -27,6 +27,11 @@ interface PendingChunk {
   audio: HTMLAudioElement;
 }
 
+interface AudioSamples {
+  samples: Float32Array;
+  sampleRate: number;
+}
+
 let tts: KokoroInstance | null = null;
 let ttsLoading: Promise<KokoroInstance> | null = null;
 let currentSpeed = DEFAULT_SPEED;
@@ -44,6 +49,7 @@ let currentChunk: SynthesisedChunk | null = null;
 let wordHighlightTimer: ReturnType<typeof globalThis.setInterval> | null = null;
 let currentGen = 0;
 let keepAliveAudio: HTMLAudioElement | null = null;
+let keepAliveAudioUrl: string | null = null;
 let kokoroModulePromise: Promise<KokoroModule> | null = null;
 let lastProgressPercent = -1;
 
@@ -154,7 +160,10 @@ async function getTTS(): Promise<KokoroInstance> {
 
     ttsLoading = null;
     chrome.runtime.sendMessage({ type: 'MODEL_READY' }).catch(() => undefined);
-    console.log('[ReadAloud offscreen] Kokoro ready');
+    console.log(
+      '[ReadAloud offscreen] Kokoro ready, methods:',
+      Object.getOwnPropertyNames(Object.getPrototypeOf(tts))
+    );
     return tts;
   })();
 
@@ -202,7 +211,7 @@ async function startPlayback(chunks: Chunk[], voice: string, speed: number) {
     stopCurrentPlayback(false);
     startKeepAlive();
     const cached = await checkModelCached();
-    await chrome.storage.session.set({ readAloudModelCached: cached });
+    await chrome.storage?.session?.set({ readAloudModelCached: cached }).catch(() => undefined);
 
     playQueue = chunks;
     playHead = 0;
@@ -423,23 +432,30 @@ async function synthesiseOne(chunk: Chunk, gen: number): Promise<SynthesisedChun
   if (gen !== currentGen) return null;
 
   try {
-    console.log(`[RA:tts] chunk ${chunk.index}: "${text.slice(0, 60)}"`);
+    console.log(`[RA:tts] generating chunk ${chunk.index}: "${text.slice(0, 60)}"`);
 
-    const audio = await engine.generate(text, {
+    const result = await engine.generate(text, {
       voice: (currentVoice || DEFAULT_VOICE) as any
-    }) as unknown as { data?: Float32Array; audio?: Float32Array; sampling_rate?: number; sample_rate?: number };
+    }) as unknown;
+
+    console.log('[RA:tts] generate() returned:', describeGenerateResult(result));
 
     if (gen !== currentGen) return null;
 
-    const samples = audio.data ?? audio.audio;
-    if (!samples?.length) {
-      console.warn('[ReadAloud offscreen] generate returned no audio samples', audio);
+    const extracted = extractAudioSamples(result);
+    if (!extracted) {
+      console.error('[ReadAloud offscreen] generate returned an unknown audio shape', summarizeUnknownResult(result));
       return null;
     }
 
-    const sampleRate = audio.sampling_rate ?? audio.sample_rate ?? 24000;
+    const { samples, sampleRate } = extracted;
+    if (!samples.length) {
+      console.error('[ReadAloud offscreen] generate returned empty audio samples');
+      return null;
+    }
+
     if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
-      console.warn('[ReadAloud offscreen] generate returned invalid sample rate', audio);
+      console.warn('[ReadAloud offscreen] generate returned invalid sample rate', sampleRate);
       return null;
     }
 
@@ -460,6 +476,90 @@ async function synthesiseOne(chunk: Chunk, gen: number): Promise<SynthesisedChun
     console.error(`[ReadAloud offscreen] synthesis failed for chunk ${chunk.index}`, error);
     return null;
   }
+}
+
+function extractAudioSamples(result: unknown): AudioSamples | null {
+  if (result instanceof Float32Array) {
+    return { samples: result, sampleRate: 24000 };
+  }
+
+  if (Array.isArray(result)) {
+    const first = result[0];
+    if (first instanceof Float32Array) {
+      return { samples: first, sampleRate: readSampleRate(result[1]) };
+    }
+    return extractAudioSamples(first);
+  }
+
+  if (!result || typeof result !== 'object') return null;
+
+  const record = result as Record<string, unknown>;
+  const samples = findFloat32Samples(record.audio)
+    ?? findFloat32Samples(record.data)
+    ?? findFloat32Samples(record.samples)
+    ?? findFloat32Samples(record.waveform)
+    ?? findFloat32Samples(record.output)
+    ?? findFloat32Samples(record[0]);
+
+  if (!samples) return null;
+
+  return {
+    samples,
+    sampleRate: readSampleRate(record.sampling_rate ?? record.sample_rate ?? record.sampleRate ?? record.rate)
+  };
+}
+
+function findFloat32Samples(value: unknown): Float32Array | null {
+  if (value instanceof Float32Array) return value;
+  if (!value || typeof value !== 'object') return null;
+
+  const record = value as Record<string, unknown>;
+  return findFloat32Samples(record.data)
+    ?? findFloat32Samples(record.audio)
+    ?? findFloat32Samples(record.samples)
+    ?? findFloat32Samples(record.cpuData);
+}
+
+function readSampleRate(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 24000;
+}
+
+function describeGenerateResult(result: unknown) {
+  if (!result) {
+    return {
+      type: typeof result,
+      keys: 'null',
+      hasAudio: false,
+      hasData: false,
+      hasSamplingRate: false,
+      isArray: false,
+      constructor: null
+    };
+  }
+
+  const record = typeof result === 'object' ? result as Record<string, unknown> : {};
+  return {
+    type: typeof result,
+    keys: typeof result === 'object' ? Object.keys(record) : [],
+    hasAudio: record.audio instanceof Float32Array,
+    hasData: record.data instanceof Float32Array,
+    hasSamplingRate: typeof record.sampling_rate === 'number',
+    isArray: Array.isArray(result),
+    constructor: typeof result === 'object' ? result.constructor?.name : undefined
+  };
+}
+
+function summarizeUnknownResult(result: unknown) {
+  if (!result || typeof result !== 'object') return result;
+
+  const record = result as Record<string, unknown>;
+  return Object.fromEntries(Object.entries(record).slice(0, 12).map(([key, value]) => {
+    if (value instanceof Float32Array) return [key, `Float32Array(${value.length})`];
+    if (ArrayBuffer.isView(value)) return [key, `${value.constructor.name}(${value.byteLength} bytes)`];
+    if (Array.isArray(value)) return [key, `Array(${value.length})`];
+    if (value && typeof value === 'object') return [key, { constructor: value.constructor?.name, keys: Object.keys(value).slice(0, 12) }];
+    return [key, value];
+  }));
 }
 
 function stopCurrentPlayback(cancelCurrent = true) {
@@ -509,13 +609,20 @@ function completePlayback(gen: number) {
 function startKeepAlive() {
   if (keepAliveAudio) return;
 
-  const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-  keepAliveAudio = new Audio(silentWav);
-  keepAliveAudio.loop = true;
-  keepAliveAudio.volume = 0;
-  keepAliveAudio.play().catch((error) => {
-    console.warn('[ReadAloud offscreen] keepalive audio failed', error);
-  });
+  try {
+    const sampleRate = 24000;
+    const wavBlob = float32ToWav(new Float32Array(sampleRate), sampleRate);
+    keepAliveAudioUrl = URL.createObjectURL(wavBlob);
+    keepAliveAudio = new Audio(keepAliveAudioUrl);
+    keepAliveAudio.loop = true;
+    keepAliveAudio.volume = 0.001;
+    keepAliveAudio.play().catch((error) => {
+      console.warn('[ReadAloud offscreen] keepalive audio failed', error instanceof Error ? error.message : error);
+      stopKeepAlive();
+    });
+  } catch (error) {
+    console.warn('[ReadAloud offscreen] keepalive setup failed', error);
+  }
 }
 
 function stopKeepAlive() {
@@ -524,6 +631,10 @@ function stopKeepAlive() {
   keepAliveAudio.removeAttribute('src');
   keepAliveAudio.load();
   keepAliveAudio = null;
+  if (keepAliveAudioUrl) {
+    cleanupObjectUrl(keepAliveAudioUrl);
+    keepAliveAudioUrl = null;
+  }
 }
 
 async function checkModelCached(): Promise<boolean> {

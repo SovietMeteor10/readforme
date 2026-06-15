@@ -17,7 +17,9 @@ declare global {
   }
 }
 
-if (!window.__readAloudActive) {
+if (window.__readAloudActive) {
+  registerMessageListener();
+} else {
   window.__readAloudActive = true;
   initReadAloud();
 }
@@ -29,6 +31,10 @@ function initReadAloud() {
   window.__readAloudReadingSelection ??= false;
   window.__readAloudClickHandlerAttached ??= false;
 
+  registerMessageListener();
+}
+
+function registerMessageListener() {
   if (!window.__readAloudInjected) {
     window.__readAloudInjected = true;
     document.addEventListener('contextmenu', (event) => {
