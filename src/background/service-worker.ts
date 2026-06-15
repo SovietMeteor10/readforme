@@ -268,7 +268,7 @@ async function ensureOffscreen() {
         reasons: [chrome.offscreen.Reason.AUDIO_PLAYBACK],
         justification: 'Kokoro TTS synthesis and audio playback'
       })
-      .then(() => delay(100))
+      .then(() => delay(500))
       .finally(() => {
         offscreenCreation = null;
       });

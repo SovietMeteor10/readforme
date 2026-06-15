@@ -70,6 +70,29 @@ if (transformersWasmEnv) {
 }
 console.info('[ReadAloud offscreen] ONNX WASM path:', wasmPath);
 
+// Start a silent AudioContext immediately on module load to keep the offscreen
+// document alive. Chrome closes AUDIO_PLAYBACK offscreen documents that produce
+// no audio. This must run before any async work (model loading, synthesis).
+(function bootstrapKeepAlive() {
+  try {
+    const ctx = new AudioContext({ sampleRate: 24000 });
+    const buf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate); // 1s silence
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    src.connect(ctx.destination);
+    src.start(0);
+    // Store so getAudioCtx() reuses this same context
+    audioCtx = ctx;
+    gainNode = ctx.createGain();
+    gainNode.gain.value = 1.0;
+    gainNode.connect(ctx.destination);
+    console.log('[RA:offscreen] bootstrap AudioContext started, state:', ctx.state);
+  } catch (e) {
+    console.warn('[RA:offscreen] bootstrap keepalive failed:', e);
+  }
+})();
+
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
   void handleMessage(message).then(sendResponse).catch((error) => {
     chrome.runtime.sendMessage({
