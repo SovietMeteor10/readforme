@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "ReadAloud",
+  "version": "1.0.0",
+  "description": "Read any webpage aloud with natural AI voices. 100% on-device.",
+  "minimum_chrome_version": "116",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "permissions": [
+    "activeTab",
+    "storage",
+    "offscreen",
+    "scripting",
+    "contextMenus",
+    "unlimitedStorage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*"
+  ],
+  "background": {
+    "service_worker": "service-worker-loader.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "ReadAloud",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "src/popup/popup.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "assets/content.ts-loader.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
+      "css": [
+        "src/content/player/player.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "src/offscreen/offscreen.html",
+        "src/popup/popup.html",
+        "src/welcome/welcome.html",
+        "assets/*",
+        "assets/ort/*",
+        "assets/constants-CbbEX0NZ.js",
+        "assets/content.ts-DyLHOSJU.js"
+      ],
+      "use_dynamic_url": false
+    }
+  ]
+}

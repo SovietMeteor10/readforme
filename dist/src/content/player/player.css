@@ -1,0 +1,138 @@
+#readaloud-player {
+  all: initial;
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 2147483647;
+  width: 320px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: rgba(20, 20, 20, 0.92);
+  color: #fff;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.35);
+  font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#readaloud-player *,
+#readaloud-player *::before,
+#readaloud-player *::after {
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+#readaloud-player[data-state="hidden"] {
+  display: none;
+}
+
+#readaloud-player[data-state="loading"] .ra-btn-primary {
+  animation: ra-pulse 1.1s ease-in-out infinite;
+}
+
+#readaloud-player .ra-track {
+  cursor: move;
+  user-select: none;
+  margin-bottom: 10px;
+}
+
+#readaloud-player .ra-title {
+  color: #fff;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  margin-bottom: 8px;
+}
+
+#readaloud-player .ra-progress-bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#readaloud-player .ra-progress-fill,
+#readaloud-player .ra-model-bar {
+  width: 0;
+  height: 100%;
+  background: #ffd83d;
+  transition: width 0.2s ease;
+}
+
+#readaloud-player .ra-controls {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+#readaloud-player .ra-btn,
+#readaloud-player select {
+  border: 0;
+  border-radius: 8px;
+  min-height: 30px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#readaloud-player .ra-btn {
+  width: 30px;
+  padding: 0;
+  cursor: pointer;
+}
+
+#readaloud-player .ra-btn-primary {
+  background: #fff;
+  color: #111;
+  font-weight: 700;
+}
+
+#readaloud-player .ra-btn-close {
+  margin-left: auto;
+}
+
+#readaloud-player select {
+  max-width: 74px;
+  padding: 0 4px;
+}
+
+#readaloud-player .ra-model-progress {
+  margin-top: 10px;
+  height: 18px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  position: relative;
+}
+
+#readaloud-player .ra-model-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 11px;
+}
+
+[data-readaloud-id].ra-highlight {
+  background-color: rgba(255, 230, 80, 0.25) !important;
+  border-left: 3px solid rgba(255, 200, 0, 0.8) !important;
+  padding-left: 4px !important;
+  border-radius: 0 4px 4px 0 !important;
+  display: block !important;
+  transition: background-color 0.2s ease !important;
+}
+
+.ra-word-active {
+  background-color: rgba(255, 160, 0, 0.6) !important;
+  border-radius: 2px !important;
+  padding: 0 1px !important;
+}
+
+@keyframes ra-pulse {
+  0%, 100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
