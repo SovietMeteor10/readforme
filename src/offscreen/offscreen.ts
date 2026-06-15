@@ -28,7 +28,7 @@ interface PendingChunk {
 }
 
 let tts: KokoroInstance | null = null;
-let initPromise: Promise<KokoroInstance> | null = null;
+let ttsLoading: Promise<KokoroInstance> | null = null;
 let currentSpeed = DEFAULT_SPEED;
 let currentVoice = DEFAULT_VOICE;
 let playQueue: Chunk[] = [];
@@ -45,14 +45,17 @@ let wordHighlightTimer: ReturnType<typeof globalThis.setInterval> | null = null;
 let currentGen = 0;
 let keepAliveAudio: HTMLAudioElement | null = null;
 let kokoroModulePromise: Promise<KokoroModule> | null = null;
-let lastProgressSent = 0;
-let lastProgressStatus = '';
+let lastProgressPercent = -1;
 
 const wasmPath = chrome.runtime.getURL('assets/ort/');
 ort.env.logLevel = 'error';
+const ortWasmEnv = (ort.env as typeof ort.env & { wasm?: { wasmPaths?: string; numThreads?: number } }).wasm;
+if (ortWasmEnv) {
+  ortWasmEnv.wasmPaths = wasmPath;
+  ortWasmEnv.numThreads = 1;
+}
 transformersEnv.useBrowserCache = true;
 transformersEnv.allowRemoteModels = true;
-transformersEnv.allowLocalModels = false;
 const transformersWasmEnv = transformersEnv.backends.onnx.wasm;
 if (transformersWasmEnv) {
   transformersWasmEnv.wasmPaths = wasmPath;
@@ -75,7 +78,7 @@ async function handleMessage(message: ExtensionMessage) {
   switch (message.type) {
     case 'PREWARM_OFFSCREEN':
       console.info('[ReadAloud offscreen] prewarming Kokoro only');
-      void initTTS(DEFAULT_VOICE).catch((error) => {
+      void getTTS().catch((error) => {
         console.warn('[ReadAloud offscreen] prewarm failed', error);
       });
       return { ok: true };
@@ -127,38 +130,39 @@ async function handleMessage(message: ExtensionMessage) {
   }
 }
 
-async function initTTS(_voice: string): Promise<KokoroInstance> {
+async function getTTS(): Promise<KokoroInstance> {
   if (tts) return tts;
-  if (initPromise) return initPromise;
+  if (ttsLoading) return ttsLoading;
 
-  initPromise = (async () => {
+  ttsLoading = (async () => {
     const { KokoroTTS } = await loadKokoro();
     try {
-      console.info('[ReadAloud offscreen] Loading Kokoro with WebGPU/WASM preference', {
+      console.info('[ReadAloud offscreen] Loading Kokoro with WASM q8', {
         useBrowserCache: transformersEnv.useBrowserCache,
-        allowLocalModels: transformersEnv.allowLocalModels,
         allowRemoteModels: transformersEnv.allowRemoteModels,
         wasmThreads: transformersWasmEnv?.numThreads
       });
-      tts = await KokoroTTS.from_pretrained(MODEL_NAME, {
-        dtype: 'fp32',
-        device: (navigator as Navigator & { gpu?: unknown }).gpu ? 'webgpu' : 'wasm',
-        progress_callback: forwardProgress
-      });
-    } catch (error) {
-      console.warn('[ReadAloud offscreen] WebGPU load failed; falling back to WASM q8', error);
       tts = await KokoroTTS.from_pretrained(MODEL_NAME, {
         dtype: 'q8',
         device: 'wasm',
         progress_callback: forwardProgress
       });
+    } catch (error) {
+      ttsLoading = null;
+      throw error;
     }
 
-    chrome.runtime.sendMessage({ type: 'MODEL_READY' });
+    ttsLoading = null;
+    chrome.runtime.sendMessage({ type: 'MODEL_READY' }).catch(() => undefined);
+    console.log('[ReadAloud offscreen] Kokoro ready');
     return tts;
   })();
 
-  return initPromise;
+  ttsLoading.catch(() => {
+    ttsLoading = null;
+  });
+
+  return ttsLoading;
 }
 
 async function loadKokoro(): Promise<KokoroModule> {
@@ -217,6 +221,16 @@ async function startPlayback(chunks: Chunk[], voice: string, speed: number) {
       stopKeepAlive();
       return;
     }
+
+    try {
+      await getTTS();
+    } catch (error) {
+      stopKeepAlive();
+      sendError(`Failed to load voice model: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+
+    if (gen !== currentGen) return;
 
     const firstPromise = synthesiseOne(chunks[0], gen);
     if (chunks.length > 1) fetchAndStage(1, gen);
@@ -394,24 +408,40 @@ function playDirect(result: SynthesisedChunk, gen: number, existingAudio?: HTMLA
 async function synthesiseOne(chunk: Chunk, gen: number): Promise<SynthesisedChunk | null> {
   if (gen !== currentGen) return null;
 
-  const text = chunk.text.trim();
-  if (!text) return null;
+  const text = chunk.text?.trim();
+  if (!text || text.length < 2) return null;
+
+  let engine: KokoroInstance;
+  try {
+    engine = await getTTS();
+  } catch (error) {
+    console.error('[ReadAloud offscreen] TTS load failed:', error);
+    sendError(`Failed to load voice model: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+
+  if (gen !== currentGen) return null;
 
   try {
-    console.log(`[RA:tts] synthesising chunk ${chunk.index}: "${text.slice(0, 80)}..."`);
-    const engine = await initTTS(currentVoice || DEFAULT_VOICE);
-    if (gen !== currentGen) return null;
+    console.log(`[RA:tts] chunk ${chunk.index}: "${text.slice(0, 60)}"`);
 
     const audio = await engine.generate(text, {
-      voice: (currentVoice || DEFAULT_VOICE) as any,
-      speed: currentSpeed
+      voice: (currentVoice || DEFAULT_VOICE) as any
     }) as unknown as { data?: Float32Array; audio?: Float32Array; sampling_rate?: number; sample_rate?: number };
 
     if (gen !== currentGen) return null;
 
     const samples = audio.data ?? audio.audio;
+    if (!samples?.length) {
+      console.warn('[ReadAloud offscreen] generate returned no audio samples', audio);
+      return null;
+    }
+
     const sampleRate = audio.sampling_rate ?? audio.sample_rate ?? 24000;
-    if (!samples?.length) throw new Error('Synthesis produced empty audio.');
+    if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+      console.warn('[ReadAloud offscreen] generate returned invalid sample rate', audio);
+      return null;
+    }
 
     const durationMs = (samples.length / sampleRate) * 1000;
     const wavBlob = float32ToWav(samples, sampleRate);
@@ -520,12 +550,10 @@ async function checkModelCached(): Promise<boolean> {
 }
 
 function forwardProgress(progress: Partial<ProgressPayload>) {
-  const now = Date.now();
-  const status = progress.status ?? '';
-  if (status === 'progress' && status === lastProgressStatus && now - lastProgressSent < 500) return;
+  const percent = Math.round(progress.progress ?? 0);
+  if (progress.status === 'progress' && percent - lastProgressPercent < 5) return;
 
-  lastProgressSent = now;
-  lastProgressStatus = status;
+  lastProgressPercent = percent;
   console.info('[ReadAloud offscreen] model progress', progress);
   chrome.runtime.sendMessage({
     type: 'MODEL_LOADING',
