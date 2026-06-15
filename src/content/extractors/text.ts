@@ -60,7 +60,7 @@ export function splitSentences(text: string): string[] {
 }
 
 function splitLongSentence(sentence: string): string[] {
-  if (sentence.length <= 150) return [sentence];
+  if (sentence.length <= 500) return [sentence];
 
   const result: string[] = [];
   const parts = sentence.split(/[,;]\s+/);
@@ -68,7 +68,7 @@ function splitLongSentence(sentence: string): string[] {
 
   for (const part of parts) {
     const candidate = current ? `${current}, ${part}` : part;
-    if (candidate.length <= 150) {
+    if (candidate.length <= 500) {
       current = candidate;
     } else {
       if (current) result.push(current);
@@ -77,7 +77,7 @@ function splitLongSentence(sentence: string): string[] {
   }
 
   if (current) result.push(current);
-  return result.flatMap((part) => part.length <= 150 ? [part] : splitByWords(part));
+  return result.flatMap((part) => part.length <= 500 ? [part] : splitByWords(part));
 }
 
 function splitByWords(text: string): string[] {
@@ -86,7 +86,7 @@ function splitByWords(text: string): string[] {
 
   for (const word of text.split(/\s+/)) {
     const candidate = current ? `${current} ${word}` : word;
-    if (candidate.length <= 150) {
+    if (candidate.length <= 500) {
       current = candidate;
     } else {
       if (current) chunks.push(current);

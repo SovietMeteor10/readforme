@@ -23,7 +23,7 @@ export async function extractContent(doc: Document): Promise<Chunk[]> {
   }
 
   const articleChunks = extractArticleChunks(doc);
-  if (articleChunks.reduce((sum, chunk) => sum + chunk.text.length, 0) > GOOD_TEXT_LENGTH) return articleChunks;
+  if (articleChunks.length > 0) return articleChunks;
 
   const readable = extractReadability(doc);
   if (readable.length > GOOD_TEXT_LENGTH) return chunkText(readable, doc);

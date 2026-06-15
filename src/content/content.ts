@@ -163,6 +163,17 @@ function showError(message: string) {
   getPlayer().showError({ message, recoverable: true });
 }
 
+// chrome.runtime.sendMessage throws synchronously ("Extension context
+// invalidated") if the extension was reloaded while this page stayed open.
+// Swallow it so stray page event handlers don't crash.
+function safeSendMessage(message: ExtensionMessage): void {
+  try {
+    void chrome.runtime.sendMessage(message).catch(() => undefined);
+  } catch {
+    /* extension reloaded — page needs a refresh */
+  }
+}
+
 function getSelectedTextChunks(): Chunk[] | null {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) return null;
@@ -240,19 +251,23 @@ function attachParagraphClickHandlers() {
 }
 
 function handleParagraphClick(event: MouseEvent) {
-  const player = document.getElementById('readaloud-player');
-  if (!player || player.dataset.state === 'hidden') return;
-  if (player.contains(event.target as Node)) return;
+  try {
+    const player = document.getElementById('readaloud-player');
+    if (!player || player.dataset.state === 'hidden') return;
+    if (player.contains(event.target as Node)) return;
 
-  const target = event.target instanceof Element ? event.target : null;
-  const paragraph = target?.closest('[data-readaloud-id]');
-  const paragraphId = paragraph?.getAttribute('data-readaloud-id');
-  if (!paragraphId || paragraphId === 'ra-selection') return;
+    const target = event.target instanceof Element ? event.target : null;
+    const paragraph = target?.closest('[data-readaloud-id]');
+    const paragraphId = paragraph?.getAttribute('data-readaloud-id');
+    if (!paragraphId || paragraphId === 'ra-selection') return;
 
-  event.preventDefault();
-  event.stopPropagation();
-  console.log('[RA:content] seeking to paragraph:', paragraphId);
-  chrome.runtime.sendMessage({ type: 'SEEK_TO_PARAGRAPH', payload: { paragraphId } });
+    event.preventDefault();
+    event.stopPropagation();
+    console.log('[RA:content] seeking to paragraph:', paragraphId);
+    safeSendMessage({ type: 'SEEK_TO_PARAGRAPH', payload: { paragraphId } });
+  } catch {
+    /* extension reloaded — ignore */
+  }
 }
 
 function updatePlayerState(payload?: { state?: string; total?: number }) {
@@ -272,11 +287,9 @@ function prepareChunksForHighlight(inputChunks: Chunk[]): Chunk[] {
     return { ...chunk, index, wordOffset: chunk.wordOffset ?? currentOffset };
   });
 
-  for (const paragraphId of new Set(prepared.map((chunk) => chunk.paragraphId))) {
-    const element = document.querySelector(`[data-readaloud-id="${CSS.escape(paragraphId)}"]`);
-    if (element) wrapWordsInSpans(element, paragraphId);
-  }
-
+  // Intentionally NOT wrapping words in <span> here: it mutates the page DOM
+  // (replacing text nodes), which fragments the article and breaks a second
+  // extraction. Paragraph-level highlighting via HIGHLIGHT is sufficient.
   return prepared;
 }
 
