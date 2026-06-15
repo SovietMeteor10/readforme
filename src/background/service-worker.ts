@@ -171,7 +171,6 @@ async function startPlayback(payload: PlayPayload, tabId: number | null) {
   speed = payload.speed || DEFAULT_SPEED;
   state = 'loading';
 
-  await chrome.storage.session.set({ activePlaybackTabId: activeTabId });
   chunks = payload.chunks;
   await sendAllChunks(chunks);
 }
@@ -208,7 +207,6 @@ async function stopPlayback(sendStop = true) {
   currentChunkIndex = 0;
   if (sendStop) sendToOffscreen({ type: 'STOP_OFFSCREEN' });
   activeTabId = null;
-  await chrome.storage.session.remove('activePlaybackTabId');
 }
 
 async function seekToParagraph(paragraphId?: string) {

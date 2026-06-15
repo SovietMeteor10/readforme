@@ -176,10 +176,7 @@ async function getTTS(): Promise<KokoroInstance> {
 
 async function loadKokoro(): Promise<KokoroModule> {
   if (!kokoroModulePromise) {
-    kokoroModulePromise = import('kokoro-js').then((module) => {
-      module.env.wasmPaths = wasmPath;
-      return module;
-    });
+    kokoroModulePromise = import('kokoro-js');
   }
 
   return kokoroModulePromise;
@@ -210,8 +207,6 @@ async function startPlayback(chunks: Chunk[], voice: string, speed: number) {
   try {
     stopCurrentPlayback(false);
     startKeepAlive();
-    const cached = await checkModelCached();
-    await chrome.storage?.session?.set({ readAloudModelCached: cached }).catch(() => undefined);
 
     playQueue = chunks;
     playHead = 0;
