@@ -40,6 +40,9 @@ export interface Chunk {
 export interface ExtensionMessage<T = unknown> {
   type: MessageType;
   payload?: T;
+  /** Set to 'offscreen' for SW -> offscreen messages so the offscreen listener
+   * can ignore unrelated runtime broadcasts (e.g. content -> SW messages). */
+  target?: 'offscreen';
 }
 
 export interface PlayPayload {

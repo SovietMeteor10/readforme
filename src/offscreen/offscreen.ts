@@ -93,46 +93,55 @@ console.info('[ReadAloud offscreen] ONNX WASM path:', wasmPath);
   }
 })();
 
-chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
-  void handleMessage(message).then(sendResponse).catch((error) => {
+chrome.runtime.onMessage.addListener((message: ExtensionMessage) => {
+  // Fire and forget. The offscreen document never sends responses through the
+  // message channel — everything it reports to the SW goes via separate
+  // chrome.runtime.sendMessage calls (MODEL_READY, HIGHLIGHT, CHUNK_DONE, ...).
+  // Returning true here would tell Chrome to hold the channel open waiting for a
+  // response that never comes (getTTS() takes seconds), which Chrome treats as a
+  // crash and tears the offscreen document down.
+  if (message.target !== 'offscreen') return;
+  void handleMessage(message).catch((error) => {
+    console.error('[RA:offscreen] message handler error:', error);
     chrome.runtime.sendMessage({
       type: 'ERROR',
       payload: { message: error instanceof Error ? error.message : String(error), recoverable: true }
-    });
-    sendResponse({ ok: false });
+    }).catch(() => undefined);
   });
-  return true;
+  // Return nothing — do NOT return true.
 });
 
-async function handleMessage(message: ExtensionMessage) {
+async function handleMessage(message: ExtensionMessage): Promise<void> {
   switch (message.type) {
     case 'PREWARM_OFFSCREEN':
       console.info('[ReadAloud offscreen] prewarming Kokoro only');
       void getTTS().catch((error) => {
         console.warn('[ReadAloud offscreen] prewarm failed', error);
       });
-      return { ok: true };
+      return;
     case 'CLASSIFY_CHUNKS':
-      return { ok: true, chunks: heuristicFilter(message.payload as Chunk[]) };
+      // No longer used (filtering happens in the SW); kept for completeness.
+      heuristicFilter(message.payload as Chunk[]);
+      return;
     case 'TTS_CHUNK': {
       const payload = message.payload as TtsChunkPayload;
       await startPlayback(payload.chunk ? [payload.chunk] : [], payload.voice, payload.speed);
-      return { ok: true };
+      return;
     }
     case 'TTS_BATCH': {
       const payload = message.payload as TtsBatchPayload;
       await startPlayback(payload.chunks ?? [], payload.voice, payload.speed);
-      return { ok: true };
+      return;
     }
     case 'TTS_ALL_CHUNKS': {
       const payload = message.payload as PlayPayload;
       await startPlayback(payload.chunks ?? [], payload.voice, payload.speed);
-      return { ok: true };
+      return;
     }
     case 'SET_SPEED':
       currentSpeed = readSpeed(message.payload);
       if (currentSource) currentSource.playbackRate.value = currentSpeed;
-      return { ok: true };
+      return;
     case 'PAUSE_OFFSCREEN':
       isPaused = true;
       isPlaying = false;
@@ -140,7 +149,7 @@ async function handleMessage(message: ExtensionMessage) {
         void audioCtx.suspend();
       }
       stopWordHighlighting();
-      return { ok: true };
+      return;
     case 'RESUME_OFFSCREEN':
       isPaused = false;
       if (currentSource && audioCtx && audioCtx.state === 'suspended') {
@@ -152,12 +161,12 @@ async function handleMessage(message: ExtensionMessage) {
       } else if (!currentSource && waitingForNext) {
         advancePlayback(currentGen);
       }
-      return { ok: true };
+      return;
     case 'STOP_OFFSCREEN':
       stopCurrentPlayback();
-      return { ok: true };
+      return;
     default:
-      return { ok: true };
+      return;
   }
 }
 
