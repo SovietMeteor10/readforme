@@ -1,7 +1,6 @@
 import type { Chunk } from '../../shared/types';
 import { GOOD_TEXT_LENGTH } from '../../shared/constants';
 import { extractReadability } from './readability';
-import { extractOCR } from './ocr';
 import { chunkText, cleanText as cleanPlainText, innerTextClean } from './text';
 import { extractArxiv } from './sites/arxiv';
 import { extractSubstack } from './sites/substack';
@@ -32,7 +31,7 @@ export async function extractContent(doc: Document): Promise<Chunk[]> {
   const semantic = extractSemantic(doc);
   if (semantic.length > GOOD_TEXT_LENGTH) return chunkText(semantic, doc);
 
-  return extractOCR(doc);
+  return chunkText(extractSemantic(doc) || '', doc);
 }
 
 function getSiteExtractor(hostname: string): SiteExtractor | null {

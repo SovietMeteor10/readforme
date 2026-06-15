@@ -56,9 +56,16 @@ async function handleMessage(message: ExtensionMessage) {
     case 'START_FROM_ACTION':
       startReading('toolbar');
       return { ok: true };
-    case 'READ_FROM_SELECTION':
-      startReading('context', (message.payload as { selectionText?: string | null } | undefined)?.selectionText ?? null);
+    case 'READ_FROM_SELECTION': {
+      const payload = message.payload as { selectionText?: string | null } | undefined;
+      const selectionText = payload?.selectionText ?? null;
+      if (!selectionText && !window.__readAloudContextElement) {
+        startReading('toolbar', null);
+      } else {
+        startReading('context', selectionText);
+      }
       return { ok: true };
+    }
     case 'HIGHLIGHT':
       if (!(message.payload as HighlightPayload).paragraphId) clearAllHighlights();
       getPlayer().highlight(message.payload as HighlightPayload);
@@ -90,7 +97,7 @@ async function handleMessage(message: ExtensionMessage) {
 }
 
 function startReading(mode: 'toolbar' | 'context', selectionText?: string | null) {
-  if (window.__readAloudExtractionPromise) return;
+  window.__readAloudExtractionPromise = null;
   console.info('[ReadAloud content] toolbar start received');
   const ui = getPlayer();
   ui.setState('loading', 'Extracting page...');
