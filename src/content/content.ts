@@ -110,8 +110,10 @@ async function handleMessage(message: ExtensionMessage) {
 
 function startReading(mode: 'toolbar' | 'context', selectionText?: string | null) {
   const player = document.getElementById('readaloud-player');
-  if (player?.dataset.state === 'playing') {
-    console.info('[ReadAloud content] already playing, ignoring START_FROM_ACTION');
+  // Ignore repeat toolbar clicks while already playing or still loading; only an
+  // explicit text selection is allowed to restart from the toolbar.
+  if ((player?.dataset.state === 'playing' || player?.dataset.state === 'loading') && !selectionText) {
+    console.info('[ReadAloud content] already active, ignoring repeat start');
     return;
   }
 

@@ -16,7 +16,8 @@ interface SynthesisedChunk {
   chunkIndex: number;
   paragraphId: string;
   text: string;
-  audioUrl: string;
+  samples: Float32Array;
+  sampleRate: number;
   wordTimings: WordTiming[];
   durationMs: number;
   wordOffset: number;
@@ -24,7 +25,6 @@ interface SynthesisedChunk {
 
 interface PendingChunk {
   result: SynthesisedChunk;
-  audio: HTMLAudioElement;
 }
 
 interface AudioSamples {
@@ -44,12 +44,12 @@ let isFetching = false;
 let isPlaying = false;
 let isPaused = false;
 let waitingForNext = false;
-let currentAudio: HTMLAudioElement | null = null;
+let audioCtx: AudioContext | null = null;
+let currentSource: AudioBufferSourceNode | null = null;
+let playbackStartCtxTime = 0;
 let currentChunk: SynthesisedChunk | null = null;
 let wordHighlightTimer: ReturnType<typeof globalThis.setInterval> | null = null;
 let currentGen = 0;
-let keepAliveAudio: { pause: () => void } | null = null;
-let keepAliveAudioUrl: string | null = null;
 let kokoroModulePromise: Promise<KokoroModule> | null = null;
 let lastProgressPercent = -1;
 
@@ -107,24 +107,25 @@ async function handleMessage(message: ExtensionMessage) {
     }
     case 'SET_SPEED':
       currentSpeed = readSpeed(message.payload);
-      if (currentAudio) currentAudio.playbackRate = currentSpeed;
-      if (pendingNext) pendingNext.audio.playbackRate = currentSpeed;
+      if (currentSource) currentSource.playbackRate.value = currentSpeed;
       return { ok: true };
     case 'PAUSE_OFFSCREEN':
       isPaused = true;
       isPlaying = false;
-      currentAudio?.pause();
+      if (audioCtx && audioCtx.state === 'running') {
+        void audioCtx.suspend();
+      }
       stopWordHighlighting();
       return { ok: true };
     case 'RESUME_OFFSCREEN':
       isPaused = false;
-      if (currentChunk && currentAudio && currentAudio.paused) {
-        isPlaying = true;
-        startWordHighlighting(currentChunk);
-        await currentAudio.play().catch((error) => {
+      if (currentSource && audioCtx && audioCtx.state === 'suspended') {
+        await audioCtx.resume().catch((error) => {
           console.warn('[ReadAloud offscreen] resume failed', error);
         });
-      } else if (!currentAudio && pendingNext && waitingForNext) {
+        isPlaying = true;
+        if (currentChunk) startWordHighlighting(currentChunk);
+      } else if (!currentSource && waitingForNext) {
         advancePlayback(currentGen);
       }
       return { ok: true };
@@ -223,14 +224,12 @@ async function startPlayback(chunks: Chunk[], voice: string, speed: number) {
 
     if (!chunks.length) {
       sendError('No chunks to play');
-      stopKeepAlive();
       return;
     }
 
     try {
       await getTTS();
     } catch (error) {
-      stopKeepAlive();
       sendError(`Failed to load voice model: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
@@ -263,16 +262,9 @@ function fetchAndStage(index: number, gen: number) {
 
   void synthesiseOne(playQueue[index], gen).then((result) => {
     isFetching = false;
-    if (!result || gen !== currentGen) {
-      if (result) cleanupObjectUrl(result.audioUrl);
-      return;
-    }
+    if (!result || gen !== currentGen) return;
 
-    const audio = new Audio(result.audioUrl);
-    audio.playbackRate = currentSpeed;
-    audio.preload = 'auto';
-    audio.load();
-    pendingNext = { result, audio };
+    pendingNext = { result };
     console.log(`[RA:tts] staged chunk ${index}: ${(result.durationMs / 1000).toFixed(1)}s`);
 
     if (waitingForNext && !isPlaying && !isPaused && gen === currentGen) {
@@ -306,7 +298,7 @@ function advancePlayback(gen: number) {
     waitingForNext = false;
 
     if (playHead + 1 < playQueue.length) fetchAndStage(playHead + 1, gen);
-    playDirect(next.result, gen, next.audio);
+    playDirect(next.result, gen);
     return;
   }
 
@@ -336,22 +328,35 @@ function advancePlayback(gen: number) {
 }
 
 function playResult(result: SynthesisedChunk, gen: number) {
-  const audio = new Audio(result.audioUrl);
-  audio.playbackRate = currentSpeed;
-  playDirect(result, gen, audio);
+  playDirect(result, gen);
 }
 
-function playDirect(result: SynthesisedChunk, gen: number, existingAudio?: HTMLAudioElement) {
-  if (gen !== currentGen) {
-    cleanupObjectUrl(result.audioUrl);
-    return;
+function playDirect(result: SynthesisedChunk, gen: number) {
+  if (gen !== currentGen) return;
+
+  const ctx = getAudioCtx();
+
+  // Stop any source still attached before starting the next one.
+  if (currentSource) {
+    currentSource.onended = null;
+    try { currentSource.stop(); } catch { /* already stopped */ }
+    currentSource = null;
   }
 
   isPlaying = true;
   waitingForNext = false;
   currentChunk = result;
-  currentAudio = existingAudio ?? new Audio(result.audioUrl);
-  currentAudio.playbackRate = currentSpeed;
+
+  // Build an AudioBuffer straight from the Float32Array samples — no WAV
+  // encode, no blob URL, no HTMLAudioElement autoplay gate.
+  const audioBuffer = ctx.createBuffer(1, result.samples.length, result.sampleRate);
+  audioBuffer.getChannelData(0).set(result.samples);
+
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.playbackRate.value = currentSpeed;
+  source.connect(ctx.destination);
+  currentSource = source;
 
   chrome.runtime.sendMessage({
     type: 'HIGHLIGHT',
@@ -376,57 +381,21 @@ function playDirect(result: SynthesisedChunk, gen: number, existingAudio?: HTMLA
     }
   }).catch(() => undefined);
 
+  playbackStartCtxTime = ctx.currentTime;
   startWordHighlighting(result);
 
-  currentAudio.onended = () => {
-    if (gen !== currentGen) return;
+  source.onended = () => {
+    if (gen !== currentGen || source !== currentSource) return;
     isPlaying = false;
-    stopWordHighlighting();
-    cleanupObjectUrl(result.audioUrl);
-    currentAudio = null;
+    currentSource = null;
     currentChunk = null;
+    stopWordHighlighting();
     chrome.runtime.sendMessage({ type: 'CHUNK_DONE', payload: { chunkIndex: result.chunkIndex } }).catch(() => undefined);
     advancePlayback(gen);
   };
 
-  currentAudio.onerror = (error) => {
-    console.error('[ReadAloud offscreen] audio playback error', error);
-    isPlaying = false;
-    stopWordHighlighting();
-    cleanupObjectUrl(result.audioUrl);
-    currentAudio = null;
-    currentChunk = null;
-    chrome.runtime.sendMessage({ type: 'CHUNK_DONE', payload: { chunkIndex: result.chunkIndex } }).catch(() => undefined);
-    advancePlayback(gen);
-  };
-
-  console.log(
-    '[RA:offscreen] playing chunk',
-    result.chunkIndex,
-    'url:',
-    result.audioUrl.slice(0, 40),
-    'duration:',
-    result.durationMs,
-    'ms',
-    'audio.readyState:',
-    currentAudio.readyState,
-    'audio.error:',
-    currentAudio.error
-  );
-
-  currentAudio.play().catch((error) => {
-    console.error(
-      '[RA:offscreen] PLAY BLOCKED:',
-      error instanceof Error ? error.name : typeof error,
-      error instanceof Error ? error.message : String(error)
-    );
-    isPlaying = false;
-    stopWordHighlighting();
-    cleanupObjectUrl(result.audioUrl);
-    currentAudio = null;
-    currentChunk = null;
-    advancePlayback(gen);
-  });
+  console.log(`[RA:audio] playing chunk ${result.chunkIndex} via AudioContext, ${result.durationMs.toFixed(0)}ms`);
+  source.start(0);
 }
 
 async function synthesiseOne(chunk: Chunk, gen: number): Promise<SynthesisedChunk | null> {
@@ -485,14 +454,14 @@ async function synthesiseOne(chunk: Chunk, gen: number): Promise<SynthesisedChun
     }
 
     const durationMs = (samples.length / sampleRate) * 1000;
-    const wavBlob = float32ToWav(samples, sampleRate);
     console.log(`[RA:tts] chunk ${chunk.index} ready: ${(durationMs / 1000).toFixed(1)}s`);
 
     return {
       chunkIndex: chunk.index,
       paragraphId: chunk.paragraphId,
       text,
-      audioUrl: URL.createObjectURL(wavBlob),
+      samples,
+      sampleRate,
       wordTimings: estimateWordTimings(text, durationMs),
       durationMs,
       wordOffset: chunk.wordOffset ?? 0
@@ -589,35 +558,25 @@ function summarizeUnknownResult(result: unknown) {
 
 function stopCurrentPlayback(cancelCurrent = true) {
   if (cancelCurrent) currentGen += 1;
-  stopKeepAlive();
   isPaused = false;
   isPlaying = false;
   isFetching = false;
   waitingForNext = false;
 
-  if (currentAudio) {
-    currentAudio.onended = null;
-    currentAudio.onerror = null;
-    currentAudio.pause();
-    currentAudio.removeAttribute('src');
-    currentAudio.load();
-    currentAudio = null;
+  if (currentSource) {
+    currentSource.onended = null;
+    try { currentSource.stop(); } catch { /* already stopped */ }
+    currentSource = null;
   }
 
-  if (currentChunk) {
-    cleanupObjectUrl(currentChunk.audioUrl);
-    currentChunk = null;
+  // Keep the AudioContext alive for reuse, but un-suspend it so the next
+  // playback starts cleanly.
+  if (audioCtx && audioCtx.state === 'suspended') {
+    void audioCtx.resume();
   }
 
-  if (pendingNext) {
-    pendingNext.audio.onended = null;
-    pendingNext.audio.onerror = null;
-    pendingNext.audio.pause();
-    pendingNext.audio.removeAttribute('src');
-    pendingNext.audio.load();
-    cleanupObjectUrl(pendingNext.result.audioUrl);
-    pendingNext = null;
-  }
+  currentChunk = null;
+  pendingNext = null;
   pendingNextIdx = -1;
 
   playQueue = [];
@@ -627,44 +586,27 @@ function stopCurrentPlayback(cancelCurrent = true) {
 
 function completePlayback(gen: number) {
   if (gen !== currentGen) return;
-  stopKeepAlive();
   chrome.runtime.sendMessage({ type: 'PLAYBACK_COMPLETE' }).catch(() => undefined);
 }
 
-function startKeepAlive() {
-  if (keepAliveAudio) return;
-
-  try {
-    const ctx = new AudioContext({ sampleRate: 24000 });
-    const buf = ctx.createBuffer(1, 2400, 24000);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = true;
-    src.connect(ctx.destination);
-    src.start();
-    (globalThis as { __raKeepaliveCtx?: AudioContext }).__raKeepaliveCtx = ctx;
-    (globalThis as { __raKeepaliveSrc?: AudioBufferSourceNode }).__raKeepaliveSrc = src;
-    keepAliveAudio = {
-      pause: () => {
-        src.stop();
-        void ctx.close();
-      }
-    };
-  } catch (error) {
-    console.warn('[RA:offscreen] keepalive failed:', error);
+// Single AudioContext for the whole session. AudioBufferSourceNode.start() is
+// not subject to the autoplay policy that can silently block HTMLAudioElement
+// playback inside an offscreen document, and an active context keeps the
+// offscreen document alive while audio is playing.
+function getAudioCtx(): AudioContext {
+  if (!audioCtx || audioCtx.state === 'closed') {
+    audioCtx = new AudioContext({ sampleRate: 24000 });
   }
+  if (audioCtx.state === 'suspended') {
+    void audioCtx.resume();
+  }
+  return audioCtx;
 }
 
-function stopKeepAlive() {
-  if (!keepAliveAudio) return;
-  keepAliveAudio.pause();
-  keepAliveAudio = null;
-  delete (globalThis as { __raKeepaliveCtx?: AudioContext }).__raKeepaliveCtx;
-  delete (globalThis as { __raKeepaliveSrc?: AudioBufferSourceNode }).__raKeepaliveSrc;
-  if (keepAliveAudioUrl) {
-    cleanupObjectUrl(keepAliveAudioUrl);
-    keepAliveAudioUrl = null;
-  }
+function startKeepAlive() {
+  // The session AudioContext itself keeps the offscreen document alive; just
+  // make sure it exists and is running.
+  getAudioCtx();
 }
 
 async function checkModelCached(): Promise<boolean> {
@@ -716,10 +658,6 @@ function sendError(message: string) {
   }).catch(() => undefined);
 }
 
-function cleanupObjectUrl(url: string) {
-  URL.revokeObjectURL(url);
-}
-
 function cleanupReadAloudDomArtifacts(doc: Document) {
   doc.querySelectorAll('.ra-word').forEach((span) => {
     span.parentNode?.replaceChild(doc.createTextNode(span.textContent ?? ''), span);
@@ -756,13 +694,16 @@ function estimateWordTimings(text: string, durationMs: number): WordTiming[] {
 
 function startWordHighlighting(chunk: SynthesisedChunk) {
   stopWordHighlighting();
-  if (!chunk.wordTimings.length || !currentAudio) return;
+  if (!chunk.wordTimings.length || !audioCtx) return;
 
   let lastWordIndex = -1;
   wordHighlightTimer = globalThis.setInterval(() => {
-    if (!currentAudio || currentAudio.paused) return;
+    if (!audioCtx || audioCtx.state !== 'running' || !currentSource) return;
 
-    const elapsed = currentAudio.currentTime * 1000;
+    // AudioContext.currentTime freezes while the context is suspended, so this
+    // elapsed value naturally excludes paused time. Scale by playbackRate so
+    // faster playback advances word timings to match.
+    const elapsed = (audioCtx.currentTime - playbackStartCtxTime) * currentSpeed * 1000;
     let wordIndex = chunk.wordTimings.findIndex((timing) => elapsed >= timing.startMs && elapsed < timing.endMs);
     if (wordIndex < 0) wordIndex = chunk.wordTimings.length - 1;
     if (wordIndex === lastWordIndex) return;
@@ -783,38 +724,5 @@ function stopWordHighlighting() {
   if (wordHighlightTimer !== null) {
     clearInterval(wordHighlightTimer);
     wordHighlightTimer = null;
-  }
-}
-
-function float32ToWav(samples: Float32Array, sampleRate: number): Blob {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeString(view, 8, 'WAVE');
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeString(view, 36, 'data');
-  view.setUint32(40, samples.length * 2, true);
-
-  let offset = 44;
-  for (let i = 0; i < samples.length; i += 1, offset += 2) {
-    const sample = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-  }
-
-  return new Blob([buffer], { type: 'audio/wav' });
-}
-
-function writeString(view: DataView, offset: number, value: string) {
-  for (let i = 0; i < value.length; i += 1) {
-    view.setUint8(offset + i, value.charCodeAt(i));
   }
 }
