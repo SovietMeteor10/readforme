@@ -62,13 +62,21 @@ async function handleMessage(message: ExtensionMessage) {
     case 'READ_FROM_SELECTION': {
       const payload = message.payload as { selectionText?: string | null } | undefined;
       const selectionText = payload?.selectionText?.trim() ?? null;
+      const player = document.getElementById('readaloud-player');
+      const isActive = player?.dataset.state === 'playing' || player?.dataset.state === 'loading';
+
+      // Only act on explicit text selection; ignore spurious context-menu triggers while active
       if (selectionText && selectionText.length > 10) {
         startReading('context', selectionText);
         return { ok: true };
       }
 
+      if (isActive) {
+        console.info('[ReadAloud content] READ_FROM_SELECTION ignored - already active');
+        return { ok: true };
+      }
+
       const rightClickEl = window.__readAloudLastRightClick ?? null;
-      const player = document.getElementById('readaloud-player');
       const readable = rightClickEl?.closest('p, h1, h2, h3, h4, li, article, [role="main"]');
       if (rightClickEl && readable && !player?.contains(rightClickEl)) {
         startReading('context', null);

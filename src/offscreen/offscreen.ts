@@ -216,17 +216,14 @@ async function startPlayback(chunks: Chunk[], voice: string, speed: number) {
     currentSpeed = speed || currentSpeed || DEFAULT_SPEED;
     pendingNext = null;
     pendingNextIdx = -1;
-
-    chrome.runtime.sendMessage({
-      type: 'PLAYER_STATE',
-      payload: { state: 'preparing', total: chunks.length }
-    }).catch(() => undefined);
+    waitingForNext = false;
 
     if (!chunks.length) {
       sendError('No chunks to play');
       return;
     }
 
+    // Load model (instant if cached, ~2s on first run)
     try {
       await getTTS();
     } catch (error) {
@@ -236,17 +233,27 @@ async function startPlayback(chunks: Chunk[], voice: string, speed: number) {
 
     if (gen !== currentGen) return;
 
-    const firstPromise = synthesiseOne(chunks[0], gen);
-    if (chunks.length > 1) fetchAndStage(1, gen);
-
-    const first = await firstPromise;
+    // Synthesise chunk 0 — this takes ~2s, user sees model progress bar
+    const first = await synthesiseOne(chunks[0], gen);
     if (gen !== currentGen) return;
+
     if (!first) {
-      stopCurrentPlayback();
-      sendError('Synthesis failed');
+      // chunk 0 failed, try chunk 1. Keep playHead at 0 so advancePlayback
+      // (which pre-increments) lands on chunk 1 rather than skipping to chunk 2.
+      if (chunks.length > 1) {
+        playHead = 0;
+        fetchAndStage(1, gen);
+        waitingForNext = true;
+      } else {
+        sendError('Synthesis failed');
+      }
       return;
     }
 
+    // Start synthesising chunk 1 in background immediately
+    if (chunks.length > 1) fetchAndStage(1, gen);
+
+    // Play chunk 0 now — no waiting
     playResult(first, gen);
   } catch (error) {
     console.error('[ReadAloud offscreen] startPlayback failed:', error);
