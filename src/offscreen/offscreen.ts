@@ -287,6 +287,7 @@ function fetchAndStage(index: number, gen: number) {
 }
 
 function advancePlayback(gen: number) {
+  console.log('[RA] advancePlayback called, playHead:', playHead, 'pendingNext:', pendingNextIdx, 'isFetching:', isFetching);
   if (gen !== currentGen || isPaused) return;
 
   playHead += 1;
